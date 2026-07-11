@@ -4,8 +4,6 @@
 
 </div>
 
-# NSFHotkeysHUD
-
 <div align="center">
 
 # NSFHotkeysHUD
