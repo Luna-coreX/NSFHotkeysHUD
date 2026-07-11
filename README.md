@@ -48,7 +48,19 @@ Instead of remembering dozens of shortcuts, your hotkeys remain visible at all t
 
 ## 📷 Screenshots
 
-Screenshots will be added in future releases.
+<div align="center">
+
+| Main Window | Settings |
+|:---:|:---:|
+| <img src="assets/screenshots/main.png" width="400"> | <img src="assets/screenshots/settings.png" width="400"> |
+
+<br>
+
+| Add / Edit Hotkeys |
+|:---:|
+| <img src="assets/screenshots/add_edit_hotkeys.png" width="500"> |
+
+</div>
 
 ---
 
