@@ -5,6 +5,7 @@ the tray icon lifecycle, and the launch toast notifications.
 """
 
 import os
+import threading
 
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QHBoxLayout,
@@ -20,6 +21,7 @@ from PySide6.QtGui import QGuiApplication, QColor, QAction, QPixmap
 import theme
 from theme import t, fs, cs, hex_to_rgba_css, TYPE_ACCENT, CARD_BG, CARD_BG_HOVER, FONT_UI, FONT_MONO, load_theme, save_theme, apply_theme
 import storage
+import listener
 from launcher import launch_target
 from system_integration import build_tray_icon
 from hotkey_dialog import HotkeyDialog
@@ -74,6 +76,10 @@ class HotkeyHUD(QWidget):
         self.paused = False
         self._exit_requested = False
 
+        # guards self.config, which is read from the listener thread in
+        # trigger() while the GUI thread mutates it via add/edit/delete/reorder
+        self._config_lock = threading.Lock()
+
         self.show_signal.connect(self._show_toast)
 
         # =========================
@@ -102,7 +108,7 @@ class HotkeyHUD(QWidget):
         self._pulse_anim.setLoopCount(-1)
         self._pulse_anim.start()
 
-        self.title_label = QLabel(t("hud_title") + "     v" + version.__version__)
+        self.title_label = QLabel(self._title_text())
 
         self.count_badge = QLabel("0")
         self.count_badge.setAlignment(Qt.AlignCenter)
@@ -225,7 +231,6 @@ class HotkeyHUD(QWidget):
         self.toast.hide()
 
         self.fade_anim = None
-        self.resize_anim = None
 
         self.show_error_signal.connect(self._show_error_toast)
 
@@ -371,11 +376,15 @@ class HotkeyHUD(QWidget):
             }}
         """)
 
+    def _title_text(self):
+        """The HUD header label: localized title plus the app version."""
+        return t("hud_title") + "     v" + version.__version__
+
     def retranslate_ui(self):
         """Refresh every static UI string (not user data) after a language
         change - hotkey titles/paths themselves are user data and are
         never translated."""
-        self.title_label.setText(t("hud_title"))
+        self.title_label.setText(self._title_text())
         self.add_btn.setText(t("add_hotkey"))
         self.search_input.setPlaceholderText(t("search_placeholder"))
         self.minimize_btn.setToolTip(t("minimize_tooltip"))
@@ -511,7 +520,8 @@ class HotkeyHUD(QWidget):
         dialog = HotkeyDialog(self, existing_config=self.config)
         if dialog.exec() == QDialog.Accepted:
             hk = dialog.result_hotkey
-            self.config[hk] = dialog.result_data
+            with self._config_lock:
+                self.config[hk] = dialog.result_data
             self.save_config()
             self.update_hotkey_list()
 
@@ -522,11 +532,12 @@ class HotkeyHUD(QWidget):
         if dialog.exec() == QDialog.Accepted:
             new_hk = dialog.result_hotkey
 
-            # if the hotkey combo changed, remove the old key
-            if new_hk != hk and hk in self.config:
-                del self.config[hk]
+            with self._config_lock:
+                # if the hotkey combo changed, remove the old key
+                if new_hk != hk and hk in self.config:
+                    del self.config[hk]
 
-            self.config[new_hk] = dialog.result_data
+                self.config[new_hk] = dialog.result_data
             self.save_config()
             self.update_hotkey_list()
 
@@ -539,12 +550,16 @@ class HotkeyHUD(QWidget):
         )
 
         if reply == QMessageBox.Yes and hk in self.config:
-            del self.config[hk]
+            with self._config_lock:
+                del self.config[hk]
             self.save_config()
             self.update_hotkey_list()
 
     def save_config(self):
         storage.save_config(self.config)
+        # Re-register global hotkeys so add/edit/delete/reorder take effect
+        # immediately instead of only after an app restart.
+        listener.reload_hotkeys()
 
     # =========================
     # 🧾 HOTKEY CARDS
@@ -823,12 +838,13 @@ class HotkeyHUD(QWidget):
         in the new order (dicts preserve insertion order) and persist it."""
         new_order = {}
 
-        for i in range(self.list_widget.count()):
-            hk = self.list_widget.item(i).data(Qt.UserRole)
-            if hk in self.config:
-                new_order[hk] = self.config[hk]
+        with self._config_lock:
+            for i in range(self.list_widget.count()):
+                hk = self.list_widget.item(i).data(Qt.UserRole)
+                if hk in self.config:
+                    new_order[hk] = self.config[hk]
 
-        self.config = new_order
+            self.config = new_order
         self.save_config()
 
     # =========================
@@ -838,10 +854,15 @@ class HotkeyHUD(QWidget):
         if self.paused:
             return
 
-        if hotkey not in self.config:
+        # Called from the listener thread - snapshot the entry under the lock
+        # so a concurrent add/edit/delete/reorder on the GUI thread can't
+        # corrupt the read.
+        with self._config_lock:
+            data = self.config.get(hotkey)
+
+        if data is None:
             return
 
-        data = self.config[hotkey]
         title = data.get("title", "Unknown")
 
         success, error = launch_target(data)
@@ -943,16 +964,9 @@ class HotkeyHUD(QWidget):
                 max(200, self.resize_start_rect.height() + delta.y())
             )
 
-            if self.resize_anim:
-                self.resize_anim.stop()
-
-            self.resize_anim = QPropertyAnimation(self, b"geometry")
-            self.resize_anim.setDuration(120)
-            self.resize_anim.setStartValue(self.geometry())
-            self.resize_anim.setEndValue(new_rect)
-            self.resize_anim.setEasingCurve(QEasingCurve.OutCubic)
-            self.resize_anim.start()
-
+            # Apply the new size directly - animating toward a moving target on
+            # every mouse-move event produced a laggy, rubber-banding resize.
+            self.setGeometry(new_rect)
             self.update_resize_handle()
             return
 
